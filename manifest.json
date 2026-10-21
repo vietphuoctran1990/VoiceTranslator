@@ -17,7 +17,15 @@
     "https://api-free.deepl.com/*",
     "https://api.deepl.com/*",
     "https://api.cognitive.microsofttranslator.com/*",
-    "https://api.elevenlabs.io/*"
+    "https://api.elevenlabs.io/*",
+    "https://ai.tranvietphuoc.id.vn/*",
+    "http://127.0.0.1/*",
+    "http://localhost/*",
+    "https://api.openai.com/*"
+  ],
+  "optional_host_permissions": [
+    "http://*/*",
+    "https://*/*"
   ],
   "background": {
     "service_worker": "background.js"
