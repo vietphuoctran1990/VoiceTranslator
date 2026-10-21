@@ -21,6 +21,16 @@ const els = {
   elevenlabsTtsSection: document.getElementById("elevenlabs-tts-section"),
   elevenlabsApiKey: document.getElementById("elevenlabs-api-key"),
   elevenlabsVoiceId: document.getElementById("elevenlabs-voice-id"),
+  openaiTtsSection: document.getElementById("openai-tts-section"),
+  openaiTtsBaseUrl: document.getElementById("openai-tts-base-url"),
+  openaiTtsApiKey: document.getElementById("openai-tts-api-key"),
+  openaiTtsModel: document.getElementById("openai-tts-model"),
+  openaiTtsModelList: document.getElementById("openai-tts-model-list"),
+  openaiTtsVoice: document.getElementById("openai-tts-voice"),
+  openaiTtsSpeed: document.getElementById("openai-tts-speed"),
+  btnOpenaiLoadModels: document.getElementById("btn-openai-load-models"),
+  btnOpenaiTest: document.getElementById("btn-openai-test"),
+  openaiTtsTestStatus: document.getElementById("openai-tts-test-status"),
   overlayFontSize: document.getElementById("overlay-font-size"),
   overlayTextColor: document.getElementById("overlay-text-color"),
   overlayBgOpacity: document.getElementById("overlay-bg-opacity"),
@@ -59,6 +69,9 @@ const i18n = {
     title_tts_engine:"TTS Engine", title_google_tts_key:"Google TTS API Key:",
     placeholder_google_tts_key:"Leave empty for free TTS", title_tts_voice:"Voice:",
     title_elevenlabs_key:"ElevenLabs API Key:", title_elevenlabs_voice:"ElevenLabs Voice ID:",
+    title_openai_base_url:"API Base URL (OpenAI Compatible):", title_openai_api_key:"API Key / Virtual Key:",
+    title_openai_model:"TTS Model:", title_openai_voice:"Voice(s) (comma separated, per speaker):",
+    title_openai_speed:"Playback speed:", btn_load_models:"Load", btn_test_tts:"Test voice",
     title_overlay_style:"Overlay Customization", title_font_size:"Font Size:",
     title_text_color:"Text Color:", title_bg_opacity:"BG Opacity %:",
     title_dual_mode:"Dual-Mode Overlay", desc_dual_mode:"Show original text above translation",
@@ -87,6 +100,9 @@ const i18n = {
     title_tts_engine:"Động cơ Đọc (TTS Engine)", title_google_tts_key:"Google TTS API Key:",
     placeholder_google_tts_key:"Để trống để dùng Free TTS", title_tts_voice:"Giọng đọc:",
     title_elevenlabs_key:"ElevenLabs API Key:", title_elevenlabs_voice:"ElevenLabs Voice ID(s):",
+    title_openai_base_url:"API Base URL (chuẩn OpenAI):", title_openai_api_key:"API Key / Virtual Key:",
+    title_openai_model:"Model TTS:", title_openai_voice:"Giọng đọc (cách nhau dấu phẩy, theo người nói):",
+    title_openai_speed:"Tốc độ phát:", btn_load_models:"Tải DS", btn_test_tts:"Nghe thử",
     title_overlay_style:"Tùy chỉnh Phụ đề (Overlay)", title_font_size:"Cỡ chữ:",
     title_text_color:"Màu chữ:", title_bg_opacity:"Độ mờ nền %:",
     title_dual_mode:"Chế độ Song ngữ", desc_dual_mode:"Hiện văn bản gốc phía trên bản dịch",
@@ -273,7 +289,73 @@ function toggleTtsSections() {
   const engine = els.ttsEngine.value;
   els.googleTtsSection.style.display = (engine === "google_cloud" || engine === "google_free") ? "block" : "none";
   els.elevenlabsTtsSection.style.display = engine === "elevenlabs" ? "block" : "none";
+  els.openaiTtsSection.style.display = engine === "openai_compat" ? "block" : "none";
 }
+
+// Chrome only grants fetch access to hosts listed in the manifest; other
+// gateway hosts are requested at runtime (must run inside a click handler)
+async function ensureGatewayPermission(baseUrl) {
+  let origin;
+  try { origin = new URL(window.normalizeOpenAIBaseUrl(baseUrl)).origin; } catch (e) { throw new Error("Invalid Base URL"); }
+  // request() resolves true immediately if already granted; call it first so
+  // the click's user gesture is still active
+  if (!(await chrome.permissions.request({ origins: [origin + "/*"] }))) throw new Error("Permission denied for " + origin);
+}
+
+function getOpenaiTtsConfig() {
+  return {
+    baseUrl: els.openaiTtsBaseUrl.value.trim(),
+    apiKey: els.openaiTtsApiKey.value.trim(),
+    model: els.openaiTtsModel.value.trim()
+  };
+}
+
+function setTestStatus(text, isError) {
+  els.openaiTtsTestStatus.textContent = text;
+  els.openaiTtsTestStatus.style.color = isError ? "#f87171" : "#888";
+}
+
+els.btnOpenaiLoadModels.addEventListener("click", async () => {
+  const cfg = getOpenaiTtsConfig();
+  setTestStatus("...", false);
+  try {
+    await ensureGatewayPermission(cfg.baseUrl);
+    const models = await window.openaiCompatListModels(cfg);
+    // Show TTS-capable models first
+    models.sort((a, b) => (/tts|speech|audio/i.test(b) ? 1 : 0) - (/tts|speech|audio/i.test(a) ? 1 : 0));
+    els.openaiTtsModelList.innerHTML = "";
+    models.forEach(m => { const o = document.createElement("option"); o.value = m; els.openaiTtsModelList.appendChild(o); });
+    const tts = models.find(m => /tts/i.test(m));
+    if (!els.openaiTtsModel.value.trim() && tts) { els.openaiTtsModel.value = tts; saveSettings(); }
+    setTestStatus(models.length + " models", false);
+  } catch (e) {
+    setTestStatus(e.message, true);
+  }
+});
+
+let testAudio = null;
+els.btnOpenaiTest.addEventListener("click", async () => {
+  const cfg = getOpenaiTtsConfig();
+  const voice = els.openaiTtsVoice.value.split(",").map(v => v.trim()).filter(v => v)[0];
+  const lang = (els.uiLanguage ? els.uiLanguage.value : "vi") || "vi";
+  setTestStatus("...", false);
+  try {
+    await ensureGatewayPermission(cfg.baseUrl);
+    const blob = await window.openaiCompatSpeech({
+      ...cfg, voice,
+      text: lang === "vi" ? "Xin chào, đây là giọng đọc thử nghiệm." : "Hello, this is a test voice."
+    });
+    if (testAudio) testAudio.pause();
+    const url = URL.createObjectURL(blob);
+    testAudio = new Audio(url);
+    testAudio.playbackRate = parseFloat(els.openaiTtsSpeed.value) || 1.2;
+    testAudio.onended = () => URL.revokeObjectURL(url);
+    await testAudio.play();
+    setTestStatus("OK", false);
+  } catch (e) {
+    setTestStatus(e.message, true);
+  }
+});
 
 function broadcastOverlayStyle() {
   chrome.tabs.query({ active: true, currentWindow: true }, tabs => {
@@ -304,6 +386,11 @@ const saveSettings = () => {
     google_tts_voice: els.googleTtsVoice.value,
     elevenlabs_api_key: els.elevenlabsApiKey.value.trim(),
     elevenlabs_voice_id: els.elevenlabsVoiceId.value.trim(),
+    openai_tts_base_url: els.openaiTtsBaseUrl.value.trim(),
+    openai_tts_api_key: els.openaiTtsApiKey.value.trim(),
+    openai_tts_model: els.openaiTtsModel.value.trim(),
+    openai_tts_voice: els.openaiTtsVoice.value.trim(),
+    openai_tts_speed: els.openaiTtsSpeed.value,
     overlay_font_size: els.overlayFontSize.value,
     overlay_text_color: els.overlayTextColor.value,
     overlay_bg_opacity: els.overlayBgOpacity.value,
@@ -324,6 +411,7 @@ const saveSettings = () => {
 chrome.storage.local.get([
   "ui_language","soniox_api_key","source_language","target_language","audio_source","tts_engine",
   "google_tts_key","google_tts_voice","elevenlabs_api_key","elevenlabs_voice_id",
+  "openai_tts_base_url","openai_tts_api_key","openai_tts_model","openai_tts_voice","openai_tts_speed",
   "overlay_font_size","overlay_text_color","overlay_bg_opacity","overlay_dual_mode","speaker_colors",
   "translation_engine","google_translation_key","deepl_api_key","microsoft_api_key","microsoft_region",
   "custom_vocabulary","auto_stop_timer"
@@ -340,6 +428,11 @@ chrome.storage.local.get([
   if (result.google_tts_voice) els.googleTtsVoice.value = result.google_tts_voice;
   if (result.elevenlabs_api_key) els.elevenlabsApiKey.value = result.elevenlabs_api_key;
   if (result.elevenlabs_voice_id) els.elevenlabsVoiceId.value = result.elevenlabs_voice_id;
+  if (result.openai_tts_base_url) els.openaiTtsBaseUrl.value = result.openai_tts_base_url;
+  if (result.openai_tts_api_key) els.openaiTtsApiKey.value = result.openai_tts_api_key;
+  if (result.openai_tts_model) els.openaiTtsModel.value = result.openai_tts_model;
+  if (result.openai_tts_voice) els.openaiTtsVoice.value = result.openai_tts_voice;
+  if (result.openai_tts_speed) els.openaiTtsSpeed.value = result.openai_tts_speed;
   if (result.overlay_font_size) els.overlayFontSize.value = result.overlay_font_size;
   if (result.overlay_text_color) els.overlayTextColor.value = result.overlay_text_color;
   if (result.overlay_bg_opacity) els.overlayBgOpacity.value = result.overlay_bg_opacity;
@@ -370,6 +463,7 @@ els.googleTtsKey.addEventListener("input", saveSettings);
 els.googleTtsVoice.addEventListener("change", saveSettings);
 if (els.elevenlabsApiKey) els.elevenlabsApiKey.addEventListener("input", saveSettings);
 if (els.elevenlabsVoiceId) els.elevenlabsVoiceId.addEventListener("input", saveSettings);
+[els.openaiTtsBaseUrl, els.openaiTtsApiKey, els.openaiTtsModel, els.openaiTtsVoice, els.openaiTtsSpeed].forEach(el => el.addEventListener("input", saveSettings));
 els.overlayFontSize.addEventListener("input", saveSettings);
 els.overlayTextColor.addEventListener("input", saveSettings);
 els.overlayBgOpacity.addEventListener("input", saveSettings);
@@ -398,6 +492,7 @@ chrome.runtime.sendMessage({ type: "GET_SESSIONS" }, res => {
 // Live updates
 chrome.runtime.onMessage.addListener(msg => {
   if (msg.type === "STATUS_UPDATE") updateUIState(msg.isRunning, msg.status, msg.error);
+  if (msg.type === "TTS_ERROR") showError(msg.error);
   if (msg.type === "TRANSCRIPT" && msg.isTranslation && msg.isFinal) {
     chrome.runtime.sendMessage({ type: "GET_TRANSCRIPT" }, r => { if (r) updateLiveLog(r.log); });
   }
@@ -409,6 +504,15 @@ els.btnStart.addEventListener("click", () => {
   if (els.translationEngine.value === "google" && !els.googleTranslationKey.value.trim()) { showError("Google Key required."); return; }
   if (els.translationEngine.value === "deepl" && !els.deeplApiKey.value.trim()) { showError("DeepL Key required."); return; }
   if (els.translationEngine.value === "microsoft" && !els.microsoftApiKey.value.trim()) { showError("Azure Key required."); return; }
+  if (els.ttsEngine.value === "openai_compat") {
+    if (!els.openaiTtsBaseUrl.value.trim()) { showError("Gateway Base URL required."); return; }
+    ensureGatewayPermission(els.openaiTtsBaseUrl.value).then(startRecording).catch(e => showError(e.message));
+    return;
+  }
+  startRecording();
+});
+
+function startRecording() {
   els.errorMsg.style.display = "none";
   updateUIState(true, "connecting");
   chrome.runtime.sendMessage({
@@ -423,6 +527,11 @@ els.btnStart.addEventListener("click", () => {
       googleTtsVoice: els.googleTtsVoice.value,
       elevenlabsApiKey: els.elevenlabsApiKey.value.trim(),
       elevenlabsVoiceId: els.elevenlabsVoiceId.value.trim(),
+      openaiTtsBaseUrl: els.openaiTtsBaseUrl.value.trim(),
+      openaiTtsApiKey: els.openaiTtsApiKey.value.trim(),
+      openaiTtsModel: els.openaiTtsModel.value.trim(),
+      openaiTtsVoice: els.openaiTtsVoice.value.trim(),
+      openaiTtsSpeed: parseFloat(els.openaiTtsSpeed.value) || 1.2,
       translationEngine: els.translationEngine.value,
       googleTranslationKey: els.googleTranslationKey.value.trim(),
       deeplApiKey: els.deeplApiKey.value.trim(),
@@ -439,7 +548,7 @@ els.btnStart.addEventListener("click", () => {
       }
     }
   });
-});
+}
 
 els.btnStop.addEventListener("click", () => {
   els.btnStop.disabled = true;

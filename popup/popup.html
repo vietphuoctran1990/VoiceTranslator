@@ -154,6 +154,7 @@
                         <option value="google_free">Google Translate (Free)</option>
                         <option value="google_cloud">Google Cloud TTS (API Key)</option>
                         <option value="elevenlabs">ElevenLabs (High Quality)</option>
+                        <option value="openai_compat">OpenAI-compatible Gateway (Gemini TTS)</option>
                     </select>
                 </div>
                 
@@ -183,6 +184,49 @@
                     <div class="section">
                         <label for="elevenlabs-voice-id" data-i18n="title_elevenlabs_voice">Voice ID(s):</label>
                         <input type="text" id="elevenlabs-voice-id" placeholder="ID1, ID2 (comma separated)">
+                    </div>
+                </div>
+
+                <div id="openai-tts-section" style="display: none;">
+                    <div class="section">
+                        <label for="openai-tts-base-url" data-i18n="title_openai_base_url">API Base URL (OpenAI Compatible):</label>
+                        <input type="text" id="openai-tts-base-url" placeholder="http://127.0.0.1:20129/api/v1">
+                    </div>
+                    <div class="section">
+                        <label for="openai-tts-api-key" data-i18n="title_openai_api_key">API Key / Virtual Key:</label>
+                        <input type="password" id="openai-tts-api-key" placeholder="sk-...">
+                    </div>
+                    <div class="section">
+                        <label for="openai-tts-model" data-i18n="title_openai_model">TTS Model:</label>
+                        <div class="flex-row align-center" style="gap: 6px;">
+                            <input type="text" id="openai-tts-model" list="openai-tts-model-list" placeholder="gemini-2.5-flash-preview-tts" style="flex: 1;">
+                            <button type="button" id="btn-openai-load-models" class="text-btn" data-i18n="btn_load_models">Load</button>
+                        </div>
+                        <datalist id="openai-tts-model-list"></datalist>
+                    </div>
+                    <div class="section">
+                        <label for="openai-tts-voice" data-i18n="title_openai_voice">Voice(s):</label>
+                        <input type="text" id="openai-tts-voice" list="openai-tts-voice-list" placeholder="Kore, Puck (comma separated, per speaker)">
+                        <datalist id="openai-tts-voice-list">
+                            <option value="Kore"></option>
+                            <option value="Puck"></option>
+                            <option value="Charon"></option>
+                            <option value="Aoede"></option>
+                            <option value="Fenrir"></option>
+                            <option value="Leda"></option>
+                            <option value="Orus"></option>
+                            <option value="Zephyr"></option>
+                            <option value="alloy"></option>
+                            <option value="nova"></option>
+                        </datalist>
+                    </div>
+                    <div class="section flex-row align-center spread">
+                        <label for="openai-tts-speed" data-i18n="title_openai_speed">Playback speed:</label>
+                        <input type="number" id="openai-tts-speed" min="0.5" max="3" step="0.1" value="1.2" class="number-input">
+                    </div>
+                    <div class="section flex-row align-center spread">
+                        <span id="openai-tts-test-status" style="font-size: 11px; color: #888;"></span>
+                        <button type="button" id="btn-openai-test" class="text-btn" data-i18n="btn_test_tts">Test voice</button>
                     </div>
                 </div>
             </div>
@@ -284,6 +328,7 @@
         Built by Phuoctv - 0945452617
     </div>
 
+    <script src="../offscreen/openai-tts.js"></script>
     <script src="popup.js"></script>
 </body>
 </html>

@@ -6,16 +6,49 @@ let audioSource = null;
 let ttsQueue = [];
 let isPlayingTts = false;
 let currentAudio = null;
+let currentTtsItem = null;
 
 function playNextTts() {
     if (ttsQueue.length === 0) {
         isPlayingTts = false;
+        currentTtsItem = null;
         return;
     }
     isPlayingTts = true;
     const item = ttsQueue.shift();
+    currentTtsItem = item;
     const { text, lang, ttsEngine, googleTtsKey, googleTtsVoice, elevenlabsApiKey, elevenlabsVoiceId } = item;
-    if (ttsEngine === 'elevenlabs' && elevenlabsApiKey && elevenlabsVoiceId) {
+    if (ttsEngine === 'openai_compat' && item.openaiTtsBaseUrl) {
+        // OpenAI-compatible gateway (/v1/audio/speech). Comma-separated voices map to speakers
+        const voices = (item.openaiTtsVoice || '').split(',').map(v => v.trim()).filter(v => v);
+        const speakerId = item.speaker || 0;
+        const selectedVoice = voices.length ? voices[speakerId % voices.length] : undefined;
+
+        window.openaiCompatSpeech({
+            baseUrl: item.openaiTtsBaseUrl,
+            apiKey: item.openaiTtsApiKey,
+            model: item.openaiTtsModel,
+            voice: selectedVoice,
+            text: text
+        }).then(blob => {
+            // A newer sentence may have flushed the queue while we were waiting
+            if (item !== currentTtsItem) return;
+            const url = URL.createObjectURL(blob);
+            currentAudio = new Audio(url);
+            currentAudio.playbackRate = parseFloat(item.openaiTtsSpeed) || 1.2;
+            currentAudio.onended = () => { URL.revokeObjectURL(url); playNextTts(); };
+            currentAudio.onerror = () => { URL.revokeObjectURL(url); playNextTts(); };
+            currentAudio.play().catch(e => {
+                console.error("Gateway TTS Audio play blocked", e);
+                playNextTts();
+            });
+        }).catch(e => {
+            console.error("Gateway TTS Error", e);
+            if (item !== currentTtsItem) return;
+            chrome.runtime.sendMessage({ type: 'TTS_ERROR', error: e.message });
+            playNextTts();
+        });
+    } else if (ttsEngine === 'elevenlabs' && elevenlabsApiKey && elevenlabsVoiceId) {
         // Split comma-separated voice IDs
         const voiceIds = elevenlabsVoiceId.split(',').map(v => v.trim()).filter(v => v);
         const speakerId = item.speaker || 0;
@@ -131,6 +164,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 currentAudio.pause();
                 currentAudio = null;
                 isPlayingTts = false;
+                currentTtsItem = null;
             }
         }
 
@@ -141,7 +175,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             googleTtsKey: message.config.googleTtsKey, 
             googleTtsVoice: message.config.googleTtsVoice,
             elevenlabsApiKey: message.config.elevenlabsApiKey,
-            elevenlabsVoiceId: message.config.elevenlabsVoiceId
+            elevenlabsVoiceId: message.config.elevenlabsVoiceId,
+            openaiTtsBaseUrl: message.config.openaiTtsBaseUrl,
+            openaiTtsApiKey: message.config.openaiTtsApiKey,
+            openaiTtsModel: message.config.openaiTtsModel,
+            openaiTtsVoice: message.config.openaiTtsVoice,
+            openaiTtsSpeed: message.config.openaiTtsSpeed,
+            speaker: message.speaker
         });
         if (!isPlayingTts) {
             playNextTts();
@@ -418,4 +458,5 @@ function stopProcessing() {
     }
     ttsQueue = [];
     isPlayingTts = false;
+    currentTtsItem = null;
 }
