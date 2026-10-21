@@ -18,6 +18,7 @@
     "https://api.deepl.com/*",
     "https://api.cognitive.microsofttranslator.com/*",
     "https://api.elevenlabs.io/*",
+    "https://ai.tranvietphuoc.id.vn/*",
     "http://127.0.0.1/*",
     "http://localhost/*",
     "https://api.openai.com/*"

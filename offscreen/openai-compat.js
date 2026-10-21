@@ -1,6 +1,7 @@
-// OpenAI-compatible TTS client (POST {baseUrl}/audio/speech).
+// OpenAI-compatible API client: TTS (POST {baseUrl}/audio/speech), chat
+// translation (POST {baseUrl}/chat/completions) and model listing.
 // Works with OpenAI itself and self-hosted gateways (e.g. Universal AI Gateway
-// rotating Gemini keys). Shared by offscreen.js (playback) and popup.js (test).
+// rotating Gemini keys). Shared by offscreen.js and popup.js.
 
 function normalizeOpenAIBaseUrl(baseUrl) {
     let url = (baseUrl || '').trim().replace(/\/+$/, '');
@@ -101,6 +102,51 @@ async function openaiCompatListModels({ baseUrl, apiKey }) {
     return list.map(m => (typeof m === 'string' ? m : m.id || m.name)).filter(Boolean);
 }
 
+// Translate one utterance with a chat model. `history` is a list of recent
+// {original, translation} pairs used as context; `glossary` is custom vocab lines.
+async function openaiCompatTranslate({ baseUrl, apiKey, model, text, sourceLanguage, targetLanguage, history = [], glossary = '' }) {
+    const url = normalizeOpenAIBaseUrl(baseUrl);
+    if (!url) throw new Error('Gateway Base URL is required');
+
+    const source = sourceLanguage && sourceLanguage !== 'auto' ? `from language "${sourceLanguage}"` : 'from the detected source language';
+    let system = `You are a real-time speech interpreter. Translate the user's transcribed speech ${source} into language "${targetLanguage}" (ISO 639-1 code). ` +
+        'The input comes from speech recognition and may be fragmentary or contain recognition errors; translate the intended meaning naturally and concisely, as it would be spoken. ' +
+        'Output ONLY the translation, with no quotes, notes, explanations or alternatives. If the input is already in the target language, return it unchanged.';
+    if (glossary.trim()) system += `\nAlways use this glossary (source = target):\n${glossary.trim()}`;
+    if (history.length) {
+        system += '\nRecent conversation for context (do not translate it again):\n' +
+            history.map(h => `- ${h.original} => ${h.translation}`).join('\n');
+    }
+
+    const res = await fetch(`${url}/chat/completions`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...openaiAuthHeaders(apiKey) },
+        body: JSON.stringify({
+            model: model || 'gemini-2.5-flash',
+            messages: [{ role: 'system', content: system }, { role: 'user', content: text }],
+            temperature: 0.2,
+            stream: false
+        })
+    });
+
+    if (!res.ok) {
+        let detail = res.statusText;
+        try {
+            const errText = await res.text();
+            try { detail = JSON.parse(errText).error?.message || errText; } catch (e) { detail = errText || detail; }
+        } catch (e) {}
+        throw new Error(`Gateway Chat Error ${res.status}: ${String(detail).slice(0, 300)}`);
+    }
+
+    const data = await res.json();
+    let content = data.choices?.[0]?.message?.content;
+    if (Array.isArray(content)) content = content.map(c => c.text || '').join('');
+    if (typeof content !== 'string') throw new Error('Gateway Chat returned no content');
+    // Strip reasoning blocks some models emit, plus wrapping quotes
+    return content.replace(/<think>[\s\S]*?<\/think>/gi, '').trim().replace(/^["“](.*)["”]$/s, '$1').trim();
+}
+
 window.openaiCompatSpeech = openaiCompatSpeech;
+window.openaiCompatTranslate = openaiCompatTranslate;
 window.openaiCompatListModels = openaiCompatListModels;
 window.normalizeOpenAIBaseUrl = normalizeOpenAIBaseUrl;

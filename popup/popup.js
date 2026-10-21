@@ -1,5 +1,6 @@
 document.addEventListener("DOMContentLoaded", async () => {
 const SPEAKER_COLORS_DEFAULT = ["#38bdf8","#f472b6","#34d399","#fb923c"];
+const DEFAULT_GATEWAY_URL = "https://ai.tranvietphuoc.id.vn/api/v1";
 const els = {
   uiLanguage: document.getElementById("ui-language"),
   audioSource: document.getElementById("audio-source"),
@@ -31,6 +32,14 @@ const els = {
   btnOpenaiLoadModels: document.getElementById("btn-openai-load-models"),
   btnOpenaiTest: document.getElementById("btn-openai-test"),
   openaiTtsTestStatus: document.getElementById("openai-tts-test-status"),
+  openaiChatSection: document.getElementById("openai-chat-section"),
+  openaiChatBaseUrl: document.getElementById("openai-chat-base-url"),
+  openaiChatApiKey: document.getElementById("openai-chat-api-key"),
+  openaiChatModel: document.getElementById("openai-chat-model"),
+  openaiChatModelList: document.getElementById("openai-chat-model-list"),
+  btnOpenaiChatLoadModels: document.getElementById("btn-openai-chat-load-models"),
+  btnOpenaiChatTest: document.getElementById("btn-openai-chat-test"),
+  openaiChatTestStatus: document.getElementById("openai-chat-test-status"),
   overlayFontSize: document.getElementById("overlay-font-size"),
   overlayTextColor: document.getElementById("overlay-text-color"),
   overlayBgOpacity: document.getElementById("overlay-bg-opacity"),
@@ -72,6 +81,7 @@ const i18n = {
     title_openai_base_url:"API Base URL (OpenAI Compatible):", title_openai_api_key:"API Key / Virtual Key:",
     title_openai_model:"TTS Model:", title_openai_voice:"Voice(s) (comma separated, per speaker):",
     title_openai_speed:"Playback speed:", btn_load_models:"Load", btn_test_tts:"Test voice",
+    opt_openai_compat:"OpenAI-compatible Gateway (LLM)", title_openai_chat_model:"Chat Model:", btn_test_translate:"Test",
     title_overlay_style:"Overlay Customization", title_font_size:"Font Size:",
     title_text_color:"Text Color:", title_bg_opacity:"BG Opacity %:",
     title_dual_mode:"Dual-Mode Overlay", desc_dual_mode:"Show original text above translation",
@@ -103,6 +113,7 @@ const i18n = {
     title_openai_base_url:"API Base URL (chuẩn OpenAI):", title_openai_api_key:"API Key / Virtual Key:",
     title_openai_model:"Model TTS:", title_openai_voice:"Giọng đọc (cách nhau dấu phẩy, theo người nói):",
     title_openai_speed:"Tốc độ phát:", btn_load_models:"Tải DS", btn_test_tts:"Nghe thử",
+    opt_openai_compat:"Gateway chuẩn OpenAI (LLM)", title_openai_chat_model:"Model Chat:", btn_test_translate:"Dịch thử",
     title_overlay_style:"Tùy chỉnh Phụ đề (Overlay)", title_font_size:"Cỡ chữ:",
     title_text_color:"Màu chữ:", title_bg_opacity:"Độ mờ nền %:",
     title_dual_mode:"Chế độ Song ngữ", desc_dual_mode:"Hiện văn bản gốc phía trên bản dịch",
@@ -282,6 +293,7 @@ function toggleEngineSections() {
   els.googleTranslationSection.style.display = els.translationEngine.value === "google" ? "block" : "none";
   els.deeplSection.style.display = els.translationEngine.value === "deepl" ? "block" : "none";
   els.microsoftSection.style.display = els.translationEngine.value === "microsoft" ? "block" : "none";
+  els.openaiChatSection.style.display = els.translationEngine.value === "openai_compat" ? "block" : "none";
 }
 
 function toggleTtsSections() {
@@ -310,26 +322,62 @@ function getOpenaiTtsConfig() {
   };
 }
 
-function setTestStatus(text, isError) {
-  els.openaiTtsTestStatus.textContent = text;
-  els.openaiTtsTestStatus.style.color = isError ? "#f87171" : "#888";
+// Translation and TTS can share one gateway: empty chat URL/key fall back to the TTS ones
+function getOpenaiChatConfig() {
+  return {
+    baseUrl: els.openaiChatBaseUrl.value.trim() || els.openaiTtsBaseUrl.value.trim(),
+    apiKey: els.openaiChatApiKey.value.trim() || els.openaiTtsApiKey.value.trim(),
+    model: els.openaiChatModel.value.trim()
+  };
 }
 
-els.btnOpenaiLoadModels.addEventListener("click", async () => {
-  const cfg = getOpenaiTtsConfig();
-  setTestStatus("...", false);
+function setStatusText(el, text, isError) {
+  el.textContent = text;
+  el.style.color = isError ? "#f87171" : "#888";
+}
+function setTestStatus(text, isError) { setStatusText(els.openaiTtsTestStatus, text, isError); }
+
+// Fill a model datalist from GET /models; preferPattern models are listed first
+async function loadGatewayModels(cfg, listEl, inputEl, statusEl, preferPattern, excludePattern) {
+  setStatusText(statusEl, "...", false);
   try {
     await ensureGatewayPermission(cfg.baseUrl);
     const models = await window.openaiCompatListModels(cfg);
-    // Show TTS-capable models first
-    models.sort((a, b) => (/tts|speech|audio/i.test(b) ? 1 : 0) - (/tts|speech|audio/i.test(a) ? 1 : 0));
-    els.openaiTtsModelList.innerHTML = "";
-    models.forEach(m => { const o = document.createElement("option"); o.value = m; els.openaiTtsModelList.appendChild(o); });
-    const tts = models.find(m => /tts/i.test(m));
-    if (!els.openaiTtsModel.value.trim() && tts) { els.openaiTtsModel.value = tts; saveSettings(); }
-    setTestStatus(models.length + " models", false);
+    models.sort((a, b) => (preferPattern.test(b) ? 1 : 0) - (preferPattern.test(a) ? 1 : 0));
+    listEl.innerHTML = "";
+    models.forEach(m => { const o = document.createElement("option"); o.value = m; listEl.appendChild(o); });
+    const pick = models.find(m => preferPattern.test(m) && !(excludePattern && excludePattern.test(m)));
+    if (!inputEl.value.trim() && pick) { inputEl.value = pick; saveSettings(); }
+    setStatusText(statusEl, models.length + " models", false);
   } catch (e) {
-    setTestStatus(e.message, true);
+    setStatusText(statusEl, e.message, true);
+  }
+}
+
+els.btnOpenaiLoadModels.addEventListener("click", () => {
+  loadGatewayModels(getOpenaiTtsConfig(), els.openaiTtsModelList, els.openaiTtsModel, els.openaiTtsTestStatus, /tts|speech|audio/i);
+});
+
+els.btnOpenaiChatLoadModels.addEventListener("click", () => {
+  loadGatewayModels(getOpenaiChatConfig(), els.openaiChatModelList, els.openaiChatModel, els.openaiChatTestStatus,
+    /flash|gpt|chat|pro/i, /tts|image|embed|audio|speech|vision-only/i);
+});
+
+els.btnOpenaiChatTest.addEventListener("click", async () => {
+  const cfg = getOpenaiChatConfig();
+  setStatusText(els.openaiChatTestStatus, "...", false);
+  try {
+    await ensureGatewayPermission(cfg.baseUrl);
+    const t0 = Date.now();
+    const result = await window.openaiCompatTranslate({
+      ...cfg,
+      text: els.targetLang.value === "en" ? "Xin chào, hôm nay trời đẹp quá." : "Hello, the weather is really nice today.",
+      sourceLanguage: "auto",
+      targetLanguage: els.targetLang.value
+    });
+    setStatusText(els.openaiChatTestStatus, result + " (" + (Date.now() - t0) + "ms)", false);
+  } catch (e) {
+    setStatusText(els.openaiChatTestStatus, e.message, true);
   }
 });
 
@@ -391,6 +439,9 @@ const saveSettings = () => {
     openai_tts_model: els.openaiTtsModel.value.trim(),
     openai_tts_voice: els.openaiTtsVoice.value.trim(),
     openai_tts_speed: els.openaiTtsSpeed.value,
+    openai_chat_base_url: els.openaiChatBaseUrl.value.trim(),
+    openai_chat_api_key: els.openaiChatApiKey.value.trim(),
+    openai_chat_model: els.openaiChatModel.value.trim(),
     overlay_font_size: els.overlayFontSize.value,
     overlay_text_color: els.overlayTextColor.value,
     overlay_bg_opacity: els.overlayBgOpacity.value,
@@ -412,6 +463,7 @@ chrome.storage.local.get([
   "ui_language","soniox_api_key","source_language","target_language","audio_source","tts_engine",
   "google_tts_key","google_tts_voice","elevenlabs_api_key","elevenlabs_voice_id",
   "openai_tts_base_url","openai_tts_api_key","openai_tts_model","openai_tts_voice","openai_tts_speed",
+  "openai_chat_base_url","openai_chat_api_key","openai_chat_model",
   "overlay_font_size","overlay_text_color","overlay_bg_opacity","overlay_dual_mode","speaker_colors",
   "translation_engine","google_translation_key","deepl_api_key","microsoft_api_key","microsoft_region",
   "custom_vocabulary","auto_stop_timer"
@@ -428,11 +480,14 @@ chrome.storage.local.get([
   if (result.google_tts_voice) els.googleTtsVoice.value = result.google_tts_voice;
   if (result.elevenlabs_api_key) els.elevenlabsApiKey.value = result.elevenlabs_api_key;
   if (result.elevenlabs_voice_id) els.elevenlabsVoiceId.value = result.elevenlabs_voice_id;
-  if (result.openai_tts_base_url) els.openaiTtsBaseUrl.value = result.openai_tts_base_url;
+  els.openaiTtsBaseUrl.value = result.openai_tts_base_url || DEFAULT_GATEWAY_URL;
   if (result.openai_tts_api_key) els.openaiTtsApiKey.value = result.openai_tts_api_key;
   if (result.openai_tts_model) els.openaiTtsModel.value = result.openai_tts_model;
   if (result.openai_tts_voice) els.openaiTtsVoice.value = result.openai_tts_voice;
   if (result.openai_tts_speed) els.openaiTtsSpeed.value = result.openai_tts_speed;
+  if (result.openai_chat_base_url) els.openaiChatBaseUrl.value = result.openai_chat_base_url;
+  if (result.openai_chat_api_key) els.openaiChatApiKey.value = result.openai_chat_api_key;
+  if (result.openai_chat_model) els.openaiChatModel.value = result.openai_chat_model;
   if (result.overlay_font_size) els.overlayFontSize.value = result.overlay_font_size;
   if (result.overlay_text_color) els.overlayTextColor.value = result.overlay_text_color;
   if (result.overlay_bg_opacity) els.overlayBgOpacity.value = result.overlay_bg_opacity;
@@ -463,7 +518,8 @@ els.googleTtsKey.addEventListener("input", saveSettings);
 els.googleTtsVoice.addEventListener("change", saveSettings);
 if (els.elevenlabsApiKey) els.elevenlabsApiKey.addEventListener("input", saveSettings);
 if (els.elevenlabsVoiceId) els.elevenlabsVoiceId.addEventListener("input", saveSettings);
-[els.openaiTtsBaseUrl, els.openaiTtsApiKey, els.openaiTtsModel, els.openaiTtsVoice, els.openaiTtsSpeed].forEach(el => el.addEventListener("input", saveSettings));
+[els.openaiTtsBaseUrl, els.openaiTtsApiKey, els.openaiTtsModel, els.openaiTtsVoice, els.openaiTtsSpeed,
+ els.openaiChatBaseUrl, els.openaiChatApiKey, els.openaiChatModel].forEach(el => el.addEventListener("input", saveSettings));
 els.overlayFontSize.addEventListener("input", saveSettings);
 els.overlayTextColor.addEventListener("input", saveSettings);
 els.overlayBgOpacity.addEventListener("input", saveSettings);
@@ -504,9 +560,20 @@ els.btnStart.addEventListener("click", () => {
   if (els.translationEngine.value === "google" && !els.googleTranslationKey.value.trim()) { showError("Google Key required."); return; }
   if (els.translationEngine.value === "deepl" && !els.deeplApiKey.value.trim()) { showError("DeepL Key required."); return; }
   if (els.translationEngine.value === "microsoft" && !els.microsoftApiKey.value.trim()) { showError("Azure Key required."); return; }
+  // Gateway origins not in the manifest need a runtime grant, requested within this click
+  const gatewayUrls = [];
   if (els.ttsEngine.value === "openai_compat") {
-    if (!els.openaiTtsBaseUrl.value.trim()) { showError("Gateway Base URL required."); return; }
-    ensureGatewayPermission(els.openaiTtsBaseUrl.value).then(startRecording).catch(e => showError(e.message));
+    if (!els.openaiTtsBaseUrl.value.trim()) { showError("Gateway TTS Base URL required."); return; }
+    gatewayUrls.push(els.openaiTtsBaseUrl.value);
+  }
+  if (els.translationEngine.value === "openai_compat") {
+    const chat = getOpenaiChatConfig();
+    if (!chat.baseUrl) { showError("Gateway Base URL required."); return; }
+    if (!chat.model) { showError("Gateway Chat Model required."); return; }
+    gatewayUrls.push(chat.baseUrl);
+  }
+  if (gatewayUrls.length) {
+    Promise.all(gatewayUrls.map(ensureGatewayPermission)).then(startRecording).catch(e => showError(e.message));
     return;
   }
   startRecording();
@@ -533,6 +600,9 @@ function startRecording() {
       openaiTtsVoice: els.openaiTtsVoice.value.trim(),
       openaiTtsSpeed: parseFloat(els.openaiTtsSpeed.value) || 1.2,
       translationEngine: els.translationEngine.value,
+      openaiChatBaseUrl: getOpenaiChatConfig().baseUrl,
+      openaiChatApiKey: getOpenaiChatConfig().apiKey,
+      openaiChatModel: getOpenaiChatConfig().model,
       googleTranslationKey: els.googleTranslationKey.value.trim(),
       deeplApiKey: els.deeplApiKey.value.trim(),
       microsoftApiKey: els.microsoftApiKey.value.trim(),

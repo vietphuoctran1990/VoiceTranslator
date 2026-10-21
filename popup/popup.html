@@ -103,6 +103,7 @@
                     <option value="google" data-i18n="opt_google">Google Cloud Translation (Standard API)</option>
                     <option value="deepl" data-i18n="opt_deepl">DeepL API (Most Natural & Contextual)</option>
                     <option value="microsoft" data-i18n="opt_microsoft">Microsoft Translator (Azure Cognitive)</option>
+                    <option value="openai_compat" data-i18n="opt_openai_compat">OpenAI-compatible Gateway (LLM)</option>
                 </select>
             </div>
 
@@ -132,6 +133,25 @@
                 
                 <label for="microsoft-region" style="margin-top: 8px;" data-i18n="title_azure_region">Azure Region (Optional if Global):</label>
                 <input type="text" id="microsoft-region" placeholder="e.g. eastus, southeastasia, global" data-i18n="placeholder_azure_region">
+            </div>
+
+            <div class="section engine-key" id="openai-chat-section" style="display: none;">
+                <label for="openai-chat-base-url" data-i18n="title_openai_base_url">API Base URL (OpenAI Compatible):</label>
+                <input type="text" id="openai-chat-base-url" placeholder="https://ai.tranvietphuoc.id.vn/api/v1">
+
+                <label for="openai-chat-api-key" style="margin-top: 8px;" data-i18n="title_openai_api_key">API Key / Virtual Key:</label>
+                <input type="password" id="openai-chat-api-key" placeholder="sk-...">
+
+                <label for="openai-chat-model" style="margin-top: 8px;" data-i18n="title_openai_chat_model">Chat Model:</label>
+                <div class="flex-row align-center" style="gap: 6px;">
+                    <input type="text" id="openai-chat-model" list="openai-chat-model-list" placeholder="gemini-2.5-flash" style="flex: 1;">
+                    <button type="button" id="btn-openai-chat-load-models" class="text-btn" data-i18n="btn_load_models">Load</button>
+                </div>
+                <datalist id="openai-chat-model-list"></datalist>
+                <div class="flex-row align-center spread" style="margin-top: 8px;">
+                    <span id="openai-chat-test-status" style="font-size: 11px; color: #888;"></span>
+                    <button type="button" id="btn-openai-chat-test" class="text-btn" data-i18n="btn_test_translate">Test</button>
+                </div>
             </div>
         </div>
 
@@ -190,7 +210,7 @@
                 <div id="openai-tts-section" style="display: none;">
                     <div class="section">
                         <label for="openai-tts-base-url" data-i18n="title_openai_base_url">API Base URL (OpenAI Compatible):</label>
-                        <input type="text" id="openai-tts-base-url" placeholder="http://127.0.0.1:20129/api/v1">
+                        <input type="text" id="openai-tts-base-url" placeholder="https://ai.tranvietphuoc.id.vn/api/v1">
                     </div>
                     <div class="section">
                         <label for="openai-tts-api-key" data-i18n="title_openai_api_key">API Key / Virtual Key:</label>
@@ -328,7 +348,7 @@
         Built by Phuoctv - 0945452617
     </div>
 
-    <script src="../offscreen/openai-tts.js"></script>
+    <script src="../offscreen/openai-compat.js"></script>
     <script src="popup.js"></script>
 </body>
 </html>

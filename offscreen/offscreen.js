@@ -189,8 +189,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
 });
 
+const LLM_HISTORY_SIZE = 4;
+let llmHistory = [];
+let llmChain = Promise.resolve();
+let llmSession = 0;
+
 async function startProcessing(config, streamId) {
     if (audioCtx) stopProcessing();
+    llmHistory = [];
+    llmChain = Promise.resolve();
+    llmSession++;
 
     // Prepare Custom Vocabulary Rules
     customVocabularyRules = [];
@@ -361,6 +369,35 @@ async function startProcessing(config, streamId) {
                 chrome.runtime.sendMessage({ type: 'SONIOX_STATUS', status: 'error', error: "Microsoft API Fetch failed: " + err.message });
             }
         }
+
+        // If an OpenAI-compatible gateway (LLM) is the translation engine.
+        // Requests are chained so translations arrive in speech order.
+        if (config.translationEngine === 'openai_compat' && config.openaiChatBaseUrl && text.trim().length > 0) {
+            const session = llmSession;
+            llmChain = llmChain.then(async () => {
+                if (session !== llmSession) return; // stopped/restarted meanwhile
+                try {
+                    let translatedText = await window.openaiCompatTranslate({
+                        baseUrl: config.openaiChatBaseUrl,
+                        apiKey: config.openaiChatApiKey,
+                        model: config.openaiChatModel,
+                        text,
+                        sourceLanguage: config.sourceLanguage,
+                        targetLanguage: config.targetLanguage,
+                        history: llmHistory,
+                        glossary: config.customVocabulary || ''
+                    });
+                    if (!translatedText || session !== llmSession) return;
+                    translatedText = applyCustomVocabulary(translatedText);
+                    llmHistory.push({ original: text, translation: translatedText });
+                    if (llmHistory.length > LLM_HISTORY_SIZE) llmHistory.shift();
+                    chrome.runtime.sendMessage({ type: 'TRANSCRIPT', text: translatedText, isTranslation: true, isFinal: true, speaker });
+                } catch (err) {
+                    console.error("Gateway translation error:", err);
+                    chrome.runtime.sendMessage({ type: 'SONIOX_STATUS', status: 'error', error: err.message });
+                }
+            });
+        }
     };
     window.sonioxClient.onTranslation = (text, speaker) => chrome.runtime.sendMessage({ type: 'TRANSCRIPT', text: applyCustomVocabulary(text), isTranslation: true, isFinal: true, speaker });
     window.sonioxClient.onProvisional = (text, speaker) => chrome.runtime.sendMessage({ type: 'TRANSCRIPT', text: applyCustomVocabulary(text), isTranslation: false, isFinal: false, speaker });
@@ -432,6 +469,7 @@ async function startProcessing(config, streamId) {
 }
 
 function stopProcessing() {
+    llmSession++;
     if (window.sonioxClient) {
         window.sonioxClient.disconnect();
     }
