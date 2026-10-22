@@ -91,7 +91,8 @@ const i18n = {
     title_auto_stop:"Auto-Stop inactivity (mins):", desc_auto_stop:"Set 0 to disable.",
     title_live_log:"Live Session Log", log_empty:"No session data yet. Click Start to begin.",
     sessions_empty:"No saved sessions yet.", status_ready:"Ready", status_connecting:"Connecting...",
-    status_listening:"Listening", status_error:"Error"
+    status_listening:"Listening", status_error:"Error",
+    err_mic_permission:"Allow microphone access in the tab that just opened, then press Start again."
   },
   vi: {
     tab_home:"Trang chủ", tab_settings:"Cấu hình", tab_style:"Giao diện", tab_history:"Lịch sử", tab_sessions:"Phiên làm việc",
@@ -123,7 +124,8 @@ const i18n = {
     title_auto_stop:"Tự động dừng sau (phút):", desc_auto_stop:"Đặt 0 để tắt.",
     title_live_log:"Lịch sử phiên dịch", log_empty:"Chưa có dữ liệu. Nhấn Bắt đầu để dịch.",
     sessions_empty:"Chưa có phiên lưu trữ nào.", status_ready:"Sẵn sàng", status_connecting:"Đang kết nối...",
-    status_listening:"Đang nghe", status_error:"Lỗi"
+    status_listening:"Đang nghe", status_error:"Lỗi",
+    err_mic_permission:"Hãy cho phép dùng micro ở tab vừa mở, rồi bấm Bắt đầu lại."
   }
 };
 
@@ -246,15 +248,19 @@ function loadSessions() {
       const preview = s.log && s.log[0] ? (s.log[0].translation || s.log[0].original || "") : "";
       card.innerHTML =
         "<div class='session-card-header'>" +
-          "<span class='session-date'>" + date + "</span>" +
-          "<span class='session-count'>" + count + " segments</span>" +
+          "<span class='session-date'></span>" +
+          "<span class='session-count'></span>" +
         "</div>" +
-        "<div class='session-preview'>" + (preview.slice(0,100) || "...") + "</div>" +
+        "<div class='session-preview'></div>" +
         "<div class='session-actions'>" +
           "<button class='session-btn view' data-action='view'>&#128065; View</button>" +
           "<button class='session-btn export' data-action='export'>&#8659; Export</button>" +
           "<button class='session-btn delete' data-action='delete' title='Delete'>&#10005;</button>" +
         "</div>";
+      // Transcript text is untrusted (speech/LLM output): set it as text, never HTML
+      card.querySelector(".session-date").textContent = date;
+      card.querySelector(".session-count").textContent = count + " segments";
+      card.querySelector(".session-preview").textContent = preview.slice(0,100) || "...";
       card.querySelector("[data-action=view]").addEventListener("click", () => openSessionModal(s, lang));
       card.querySelector("[data-action=export]").addEventListener("click", () => {
         const md = buildMarkdown(s.log, s.startTime);
@@ -277,10 +283,11 @@ function openSessionModal(session, lang) {
   modal.className = "session-modal";
   modal.innerHTML =
     "<div class='session-modal-header'>" +
-      "<span class='session-modal-title'>" + date + "</span>" +
+      "<span class='session-modal-title'></span>" +
       "<button class='session-modal-close'>&#10005;</button>" +
     "</div>" +
     "<div class='session-modal-body' id='modal-body'></div>";
+  modal.querySelector(".session-modal-title").textContent = date;
   overlay.appendChild(modal);
   document.body.appendChild(overlay);
   const body = modal.querySelector("#modal-body");
@@ -306,12 +313,26 @@ function toggleTtsSections() {
 
 // Chrome only grants fetch access to hosts listed in the manifest; other
 // gateway hosts are requested at runtime (must run inside a click handler)
-async function ensureGatewayPermission(baseUrl) {
-  let origin;
-  try { origin = new URL(window.normalizeOpenAIBaseUrl(baseUrl)).origin; } catch (e) { throw new Error("Invalid Base URL"); }
+// Accepts one URL or a list; all origins go in a single request() call
+async function ensureGatewayPermission(baseUrls) {
+  const origins = new Set();
+  for (const baseUrl of [].concat(baseUrls)) {
+    try { origins.add(new URL(window.normalizeOpenAIBaseUrl(baseUrl)).origin + "/*"); } catch (e) { throw new Error("Invalid Base URL: " + baseUrl); }
+  }
   // request() resolves true immediately if already granted; call it first so
   // the click's user gesture is still active
-  if (!(await chrome.permissions.request({ origins: [origin + "/*"] }))) throw new Error("Permission denied for " + origin);
+  if (!(await chrome.permissions.request({ origins: [...origins] }))) throw new Error("Permission denied for " + [...origins].join(", "));
+}
+
+// The offscreen document can't show the microphone prompt, so the permission
+// is granted once from a normal extension tab (permission/permission.html)
+async function ensureMicPermission() {
+  let state = "prompt";
+  try { state = (await navigator.permissions.query({ name: "microphone" })).state; } catch (e) {}
+  if (state === "granted") return;
+  chrome.tabs.create({ url: chrome.runtime.getURL("permission/permission.html") });
+  const lang = (els.uiLanguage ? els.uiLanguage.value : "vi") || "vi";
+  throw new Error(i18n[lang].err_mic_permission);
 }
 
 function getOpenaiTtsConfig() {
@@ -548,7 +569,6 @@ chrome.runtime.sendMessage({ type: "GET_SESSIONS" }, res => {
 // Live updates
 chrome.runtime.onMessage.addListener(msg => {
   if (msg.type === "STATUS_UPDATE") updateUIState(msg.isRunning, msg.status, msg.error);
-  if (msg.type === "TTS_ERROR") showError(msg.error);
   if (msg.type === "TRANSCRIPT" && msg.isTranslation && msg.isFinal) {
     chrome.runtime.sendMessage({ type: "GET_TRANSCRIPT" }, r => { if (r) updateLiveLog(r.log); });
   }
@@ -572,11 +592,11 @@ els.btnStart.addEventListener("click", () => {
     if (!chat.model) { showError("Gateway Chat Model required."); return; }
     gatewayUrls.push(chat.baseUrl);
   }
-  if (gatewayUrls.length) {
-    Promise.all(gatewayUrls.map(ensureGatewayPermission)).then(startRecording).catch(e => showError(e.message));
-    return;
-  }
-  startRecording();
+  const permissions = gatewayUrls.length ? ensureGatewayPermission(gatewayUrls) : Promise.resolve();
+  permissions
+    .then(() => els.audioSource.value === "mic" ? ensureMicPermission() : null)
+    .then(startRecording)
+    .catch(e => showError(e.message));
 });
 
 function startRecording() {
@@ -641,9 +661,11 @@ function updateUIState(isRunning, status, error = null) {
   els.btnStop.style.display = isRunning ? "inline-block" : "none";
   els.statusDot.className = "status-dot " + status;
   const lang = (els.uiLanguage ? els.uiLanguage.value : "vi") || "vi";
-  const key = "status_" + status;
+  // Background reports connected/disconnected; the labels are listening/ready
+  const key = "status_" + ({ connected: "listening", disconnected: "ready" }[status] || status);
   if (i18n[lang][key]) els.statusText.textContent = i18n[lang][key];
   if (error) showError(error);
+  else if (status === "connected") els.errorMsg.style.display = "none";
 }
 
 function showError(msg) {

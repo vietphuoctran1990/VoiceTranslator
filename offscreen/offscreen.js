@@ -1,4 +1,5 @@
 let audioCtx = null;
+let playbackCtx = null;
 let mediaStream = null;
 let scriptProcessor = null;
 let audioSource = null;
@@ -7,6 +8,42 @@ let ttsQueue = [];
 let isPlayingTts = false;
 let currentAudio = null;
 let currentTtsItem = null;
+
+// Non-fatal problems (one failed translation or TTS request) are shown in the
+// popup without flipping the session status to "error"
+function sendWarning(error) {
+    chrome.runtime.sendMessage({ type: 'RUNTIME_WARNING', error }).catch(() => {});
+}
+
+// Play an audio URL for a queue item, unless that item was superseded
+// (queue flushed / session stopped) while its audio was being fetched
+function playTtsAudio(item, url, rate, revoke) {
+    if (item !== currentTtsItem) {
+        if (revoke) URL.revokeObjectURL(url);
+        return;
+    }
+    const audio = new Audio(url);
+    currentAudio = audio;
+    audio.playbackRate = rate;
+    const done = () => {
+        if (revoke) URL.revokeObjectURL(url);
+        if (currentAudio === audio) currentAudio = null;
+        if (item === currentTtsItem) playNextTts();
+    };
+    audio.onended = done;
+    audio.onerror = (e) => { console.error("TTS Audio error", e); done(); };
+    audio.play().catch(e => {
+        console.error("TTS Audio play blocked or failed", e);
+        done();
+    });
+}
+
+function ttsFailed(item, message) {
+    console.error(message);
+    if (item !== currentTtsItem) return;
+    sendWarning(message);
+    playNextTts();
+}
 
 function playNextTts() {
     if (ttsQueue.length === 0) {
@@ -18,43 +55,24 @@ function playNextTts() {
     const item = ttsQueue.shift();
     currentTtsItem = item;
     const { text, lang, ttsEngine, googleTtsKey, googleTtsVoice, elevenlabsApiKey, elevenlabsVoiceId } = item;
-    if (ttsEngine === 'openai_compat' && item.openaiTtsBaseUrl) {
-        // OpenAI-compatible gateway (/v1/audio/speech). Comma-separated voices map to speakers
-        const voices = (item.openaiTtsVoice || '').split(',').map(v => v.trim()).filter(v => v);
-        const speakerId = item.speaker || 0;
-        const selectedVoice = voices.length ? voices[speakerId % voices.length] : undefined;
+    // Comma-separated voices map to speakers (S1 -> first voice, S2 -> second...)
+    const pickVoice = (list) => {
+        const voices = (list || '').split(',').map(v => v.trim()).filter(v => v);
+        return voices.length ? voices[(item.speaker || 0) % voices.length] : undefined;
+    };
 
+    if (ttsEngine === 'openai_compat' && item.openaiTtsBaseUrl) {
         window.openaiCompatSpeech({
             baseUrl: item.openaiTtsBaseUrl,
             apiKey: item.openaiTtsApiKey,
             model: item.openaiTtsModel,
-            voice: selectedVoice,
+            voice: pickVoice(item.openaiTtsVoice),
             text: text
         }).then(blob => {
-            // A newer sentence may have flushed the queue while we were waiting
-            if (item !== currentTtsItem) return;
-            const url = URL.createObjectURL(blob);
-            currentAudio = new Audio(url);
-            currentAudio.playbackRate = parseFloat(item.openaiTtsSpeed) || 1.2;
-            currentAudio.onended = () => { URL.revokeObjectURL(url); playNextTts(); };
-            currentAudio.onerror = () => { URL.revokeObjectURL(url); playNextTts(); };
-            currentAudio.play().catch(e => {
-                console.error("Gateway TTS Audio play blocked", e);
-                playNextTts();
-            });
-        }).catch(e => {
-            console.error("Gateway TTS Error", e);
-            if (item !== currentTtsItem) return;
-            chrome.runtime.sendMessage({ type: 'TTS_ERROR', error: e.message });
-            playNextTts();
-        });
+            playTtsAudio(item, URL.createObjectURL(blob), parseFloat(item.openaiTtsSpeed) || 1.2, true);
+        }).catch(e => ttsFailed(item, e.message));
     } else if (ttsEngine === 'elevenlabs' && elevenlabsApiKey && elevenlabsVoiceId) {
-        // Split comma-separated voice IDs
-        const voiceIds = elevenlabsVoiceId.split(',').map(v => v.trim()).filter(v => v);
-        const speakerId = item.speaker || 0;
-        const selectedVoiceId = voiceIds[speakerId % voiceIds.length] || voiceIds[0];
-
-        fetch(`https://api.elevenlabs.io/v1/text-to-speech/${selectedVoiceId}?output_format=mp3_44100_128`, {
+        fetch(`https://api.elevenlabs.io/v1/text-to-speech/${pickVoice(elevenlabsVoiceId)}?output_format=mp3_44100_128`, {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
@@ -65,22 +83,11 @@ function playNextTts() {
                 model_id: "eleven_multilingual_v2"
             })
         }).then(res => {
-            if (!res.ok) throw new Error("ElevenLabs API Error: " + res.statusText);
+            if (!res.ok) throw new Error("ElevenLabs API Error: " + res.status + " " + res.statusText);
             return res.blob();
         }).then(blob => {
-            const url = URL.createObjectURL(blob);
-            currentAudio = new Audio(url);
-            currentAudio.playbackRate = 1.2; // Speed up ElevenLabs slightly
-            currentAudio.onended = () => { URL.revokeObjectURL(url); playNextTts(); };
-            currentAudio.onerror = () => { URL.revokeObjectURL(url); playNextTts(); };
-            currentAudio.play().catch(e => {
-                console.error("ElevenLabs Audio play blocked", e);
-                playNextTts();
-            });
-        }).catch(e => {
-            console.error("ElevenLabs Fetch Error", e);
-            playNextTts();
-        });
+            playTtsAudio(item, URL.createObjectURL(blob), 1.2, true); // Speed up ElevenLabs slightly
+        }).catch(e => ttsFailed(item, e.message));
     } else if (ttsEngine === 'google_cloud' && googleTtsKey) {
         // Use Google Cloud TTS REST API for Premium Voices
         fetch(`https://texttospeech.googleapis.com/v1/text:synthesize?key=${googleTtsKey}`, {
@@ -98,39 +105,13 @@ function playNextTts() {
                 },
             }),
         }).then(res => res.json()).then(data => {
-            if (data.audioContent) {
-                const url = `data:audio/mp3;base64,${data.audioContent}`;
-                currentAudio = new Audio(url);
-                currentAudio.playbackRate = 1.1; // Minor speed up
-                currentAudio.onended = () => playNextTts();
-                currentAudio.onerror = () => playNextTts();
-                currentAudio.play().catch(e => {
-                    console.error("Audio blocked", e);
-                    playNextTts();
-                });
-            } else {
-                if (data.error) console.error("Google TTS API Error:", data.error.message);
-                playNextTts();
-            }
-        }).catch(e => {
-            console.error("Google TTS Fetch Error", e);
-            playNextTts();
-        });
+            if (!data.audioContent) throw new Error("Google TTS API Error: " + (data.error ? data.error.message : 'no audio'));
+            playTtsAudio(item, `data:audio/mp3;base64,${data.audioContent}`, 1.1, false);
+        }).catch(e => ttsFailed(item, e.message));
     } else if (ttsEngine === 'google_free' || ttsEngine === 'true') {
-        // Fallback to Free Google Translate's unofficial API
-        const url = `https://translate.googleapis.com/translate_tts?ie=UTF-8&tl=${lang}&client=gtx&q=${encodeURIComponent(text)}`;
-        currentAudio = new Audio(url);
-        currentAudio.playbackRate = 1.5;
-        
-        currentAudio.onended = () => playNextTts();
-        currentAudio.onerror = (e) => {
-            console.error("TTS Audio error", e);
-            playNextTts();
-        };
-        currentAudio.play().catch(e => {
-            console.error("Audio play blocked or failed", e);
-            playNextTts();
-        });
+        // Free Google Translate's unofficial API (limited to ~200 chars per request)
+        const url = `https://translate.googleapis.com/translate_tts?ie=UTF-8&tl=${lang}&client=gtx&q=${encodeURIComponent(text.slice(0, 200))}`;
+        playTtsAudio(item, url, 1.5, false);
     } else {
         // Disabled or invalid
         playNextTts();
@@ -140,7 +121,9 @@ function playNextTts() {
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (message.type === 'OFFSCREEN_START') {
         startProcessing(message.config, message.streamId).catch(err => {
-            chrome.runtime.sendMessage({ type: 'SONIOX_STATUS', status: 'error', error: err.toString() });
+            // e.g. microphone permission denied: tear down and let background stop the session
+            stopProcessing();
+            chrome.runtime.sendMessage({ type: 'SONIOX_STATUS', status: 'error', error: err.toString(), fatal: true });
         });
     } else if (message.type === 'OFFSCREEN_STOP') {
         stopProcessing();
@@ -160,12 +143,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         // Hoặc nếu TTS đang tụt hậu quá xa, ngắt luôn câu hiện tại
         if (ttsQueue.length >= 1) {
             ttsQueue = []; // Chỉ giữ lại câu mới nhất
-            if (currentAudio) {
-                currentAudio.pause();
-                currentAudio = null;
-                isPlayingTts = false;
-                currentTtsItem = null;
-            }
+            // Drop the sentence being played or fetched; a pending fetch is ignored when it resolves
+            if (currentAudio) currentAudio.pause();
+            currentAudio = null;
+            isPlayingTts = false;
+            currentTtsItem = null;
         }
 
         ttsQueue.push({ 
@@ -201,7 +183,7 @@ async function startProcessing(config, streamId) {
     llmSession++;
 
     // Prepare Custom Vocabulary Rules
-    customVocabularyRules = [];
+    const customVocabularyRules = [];
     if (config.customVocabulary) {
         const lines = config.customVocabulary.split('\n');
         for (const line of lines) {
@@ -210,13 +192,12 @@ async function startProcessing(config, streamId) {
                 const targetWord = parts[0].trim();
                 const replacement = parts[1].trim();
                 if (targetWord && replacement) {
-                    // Create case-insensitive regex for the target word
+                    // Case-insensitive literal match on whole words; the boundaries are
+                    // Unicode-aware so Vietnamese letters with diacritics count as word chars
                     try {
-                        // Use word boundaries \b if it's ascii, otherwise standard global regex
-                        const isAscii = /^[A-Za-z0-9]+$/.test(targetWord);
-                        const regexStr = isAscii ? `\\b${targetWord}\\b` : targetWord;
+                        const escaped = targetWord.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
                         customVocabularyRules.push({
-                            regex: new RegExp(regexStr, 'gi'),
+                            regex: new RegExp(`(?<![\\p{L}\\p{N}])${escaped}(?![\\p{L}\\p{N}])`, 'giu'),
                             replacement: replacement
                         });
                     } catch (e) { console.error("Invalid vocabulary regex", e); }
@@ -271,13 +252,13 @@ async function startProcessing(config, streamId) {
                     chrome.runtime.sendMessage({ type: 'TRANSCRIPT', text: decodedText, isTranslation: true, isFinal: true, speaker });
                 } else if (data.error) {
                     console.error("Google Translation API Error:", data.error.message);
-                    chrome.runtime.sendMessage({ type: 'SONIOX_STATUS', status: 'error', error: "Google Translate Error: " + data.error.message });
+                    sendWarning("Google Translate Error: " + data.error.message);
                 } else {
-                    chrome.runtime.sendMessage({ type: 'SONIOX_STATUS', status: 'error', error: "Unknown Google API Error" });
+                    sendWarning("Unknown Google API Error");
                 }
             } catch (err) {
                 console.error("Google Translation fetch error:", err);
-                chrome.runtime.sendMessage({ type: 'SONIOX_STATUS', status: 'error', error: "Google API Fetch failed (CORS/Network): " + err.message });
+                sendWarning("Google API Fetch failed (CORS/Network): " + err.message);
             }
         }
 
@@ -318,13 +299,13 @@ async function startProcessing(config, streamId) {
                     chrome.runtime.sendMessage({ type: 'TRANSCRIPT', text: translatedText, isTranslation: true, isFinal: true, speaker });
                 } else if (data.message) {
                     console.error("DeepL API Error:", data.message);
-                    chrome.runtime.sendMessage({ type: 'SONIOX_STATUS', status: 'error', error: "DeepL API Error: " + data.message });
+                    sendWarning("DeepL API Error: " + data.message);
                 } else {
-                    chrome.runtime.sendMessage({ type: 'SONIOX_STATUS', status: 'error', error: "Unknown DeepL API Error" });
+                    sendWarning("Unknown DeepL API Error");
                 }
             } catch (err) {
                 console.error("DeepL fetch error:", err);
-                chrome.runtime.sendMessage({ type: 'SONIOX_STATUS', status: 'error', error: "DeepL API Fetch failed: " + err.message });
+                sendWarning("DeepL API Fetch failed: " + err.message);
             }
         }
 
@@ -360,13 +341,13 @@ async function startProcessing(config, streamId) {
                     chrome.runtime.sendMessage({ type: 'TRANSCRIPT', text: translatedText, isTranslation: true, isFinal: true, speaker });
                 } else if (data.error) {
                     console.error("Microsoft Translator API Error:", data.error.message);
-                    chrome.runtime.sendMessage({ type: 'SONIOX_STATUS', status: 'error', error: "Microsoft API Error: " + data.error.message });
+                    sendWarning("Microsoft API Error: " + data.error.message);
                 } else {
-                    chrome.runtime.sendMessage({ type: 'SONIOX_STATUS', status: 'error', error: "Unknown Microsoft API Error" });
+                    sendWarning("Unknown Microsoft API Error");
                 }
             } catch (err) {
                 console.error("Microsoft fetch error:", err);
-                chrome.runtime.sendMessage({ type: 'SONIOX_STATUS', status: 'error', error: "Microsoft API Fetch failed: " + err.message });
+                sendWarning("Microsoft API Fetch failed: " + err.message);
             }
         }
 
@@ -394,14 +375,15 @@ async function startProcessing(config, streamId) {
                     chrome.runtime.sendMessage({ type: 'TRANSCRIPT', text: translatedText, isTranslation: true, isFinal: true, speaker });
                 } catch (err) {
                     console.error("Gateway translation error:", err);
-                    chrome.runtime.sendMessage({ type: 'SONIOX_STATUS', status: 'error', error: err.message });
+                    sendWarning(err.message);
                 }
             });
         }
     };
     window.sonioxClient.onTranslation = (text, speaker) => chrome.runtime.sendMessage({ type: 'TRANSCRIPT', text: applyCustomVocabulary(text), isTranslation: true, isFinal: true, speaker });
-    window.sonioxClient.onProvisional = (text, speaker) => chrome.runtime.sendMessage({ type: 'TRANSCRIPT', text: applyCustomVocabulary(text), isTranslation: false, isFinal: false, speaker });
-    window.sonioxClient.onError = (err) => chrome.runtime.sendMessage({ type: 'SONIOX_STATUS', status: 'error', error: err });
+    // Provisional text is the source language, so the (source = target) vocabulary does not apply to it
+    window.sonioxClient.onProvisional = (text, speaker) => chrome.runtime.sendMessage({ type: 'TRANSCRIPT', text, isTranslation: false, isFinal: false, speaker });
+    window.sonioxClient.onError = (err) => sendWarning(err);
 
     // Connect Soniox WebSocket
     window.sonioxClient.connect(config);
@@ -429,9 +411,11 @@ async function startProcessing(config, streamId) {
     audioCtx = new AudioContext({ sampleRate: 16000 });
     audioSource = audioCtx.createMediaStreamSource(mediaStream);
 
-    // If tab capture, we must route the audio to destination so user can hear it
+    // Tab capture mutes the tab, so play it back for the user. Use a separate
+    // context at the device's native rate: the 16kHz one would sound muffled
     if (streamId) {
-        audioSource.connect(audioCtx.destination);
+        playbackCtx = new AudioContext();
+        playbackCtx.createMediaStreamSource(mediaStream).connect(playbackCtx.destination);
     }
 
     // Process audio data (convert to Int16 PCM) using AudioWorklet for better performance
@@ -488,6 +472,10 @@ function stopProcessing() {
     if (audioCtx) {
         audioCtx.close();
         audioCtx = null;
+    }
+    if (playbackCtx) {
+        playbackCtx.close();
+        playbackCtx = null;
     }
     // Clean up TTS
     if (currentAudio) {

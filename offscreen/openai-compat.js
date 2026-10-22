@@ -55,7 +55,8 @@ async function openaiCompatSpeech({ baseUrl, apiKey, model, voice, text, format 
     const url = normalizeOpenAIBaseUrl(baseUrl);
     if (!url) throw new Error('Gateway Base URL is required');
 
-    const body = { model: model || 'tts-1', input: text, voice: voice || 'alloy', response_format: format };
+    // Default voice is a Gemini one, since the target gateway serves Gemini TTS
+    const body = { model: model || 'tts-1', input: text, voice: voice || 'Kore', response_format: format };
     const res = await fetch(`${url}/audio/speech`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...openaiAuthHeaders(apiKey) },

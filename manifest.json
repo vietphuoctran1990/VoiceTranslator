@@ -7,8 +7,10 @@
     "activeTab",
     "tabCapture",
     "storage",
+    "unlimitedStorage",
     "offscreen",
-    "tts"
+    "alarms",
+    "scripting"
   ],
   "host_permissions": [
     "wss://stt-rt.soniox.com/*",
@@ -47,17 +49,15 @@
   },
   "content_scripts": [
     {
-      "matches": ["<all_urls>"],
-      "js": ["content/wrapper.js"],
-      "css": ["content/overlay.css"]
-    }
-  ],
-  "web_accessible_resources": [
-    {
-      "resources": [
-        "offscreen/offscreen.html"
+      "matches": [
+        "<all_urls>"
       ],
-      "matches": ["<all_urls>"]
+      "js": [
+        "content/wrapper.js"
+      ],
+      "css": [
+        "content/overlay.css"
+      ]
     }
   ]
 }
