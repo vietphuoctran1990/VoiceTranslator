@@ -1,5 +1,9 @@
-// Inject the overlay container once
-let overlayContainer = document.getElementById('my-translator-overlay');
+// Wrapped in a function scope: background.js may inject this file again into
+// tabs that already ran an older copy (e.g. after the extension was reloaded)
+(() => {
+// An overlay left by an orphaned older copy can't be driven by this one; replace it
+document.getElementById('my-translator-overlay')?.remove();
+let overlayContainer = null;
 let originalTextEl, translationTextEl, provisionalTextEl;
 
 let isDualMode = false;
@@ -176,6 +180,11 @@ function addToken(translatedText, speaker) {
 }
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+    if (msg.type === 'PING') {
+        sendResponse({ ok: true });
+        return;
+    }
+
     if (msg.type === 'TRANSCRIPT') {
         initOverlay();
         overlayContainer.style.display = 'flex';
@@ -200,7 +209,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     }
     
     if (msg.type === 'STATUS_UPDATE') {
-        if (!msg.isRunning && overlayContainer) {
+        if (!msg.isRunning && overlayContainer && provisionalTextEl) {
             provisionalTextEl.innerText = '[Stopped]';
         }
     }
@@ -209,3 +218,4 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         applyStyles(msg.style);
     }
 });
+})();

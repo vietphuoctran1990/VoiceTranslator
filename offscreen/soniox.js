@@ -6,6 +6,12 @@ const RECONNECT_DELAY_MS = 2000;
 const SESSION_DURATION_MS = 3 * 60 * 1000;
 const CONTEXT_HISTORY_CHARS = 500;
 const KEEPALIVE_INTERVAL_MS = 15000;
+// Final tokens arrive a few words at a time; buffer them into whole utterances.
+// Originals flush on Soniox's <end> token, translations shortly after their last token.
+const ORIGINAL_IDLE_FLUSH_MS = 2500;
+const TRANSLATION_IDLE_FLUSH_MS = 800;
+const MAX_BUFFER_CHARS = 300;
+const OLD_SOCKET_DRAIN_MS = 5000;
 
 class SonioxClient {
     constructor() {
@@ -18,6 +24,9 @@ class SonioxClient {
         this._sessionTimer = null;
         this._keepaliveTimer = null;
         this._recentTranslations = []; 
+        this._buffers = { orig: { text: '', speaker: 0 }, trans: { text: '', speaker: 0 } };
+        this._flushTimers = { orig: null, trans: null };
+        this._lastProvisional = '';
 
         this.onOriginal = null;       
         this.onTranslation = null;    
@@ -32,8 +41,10 @@ class SonioxClient {
         this.apiKey = apiKey;
         this._config = config;
         this._intentionalDisconnect = false;
+        this._fatalError = false;
         this._reconnectAttempts = 0;
         this._recentTranslations = [];
+        this._clearBuffers();
 
         if (!apiKey) {
             this._setStatus('error');
@@ -91,13 +102,15 @@ class SonioxClient {
 
             const oldWs = this.ws;
             if (oldWs && oldWs !== newWs) {
+                // Signal end-of-audio and let the old socket deliver its remaining
+                // final tokens (the sentence in progress) before closing it
+                oldWs._isOld = true;
                 try {
                     if (oldWs.readyState === WebSocket.OPEN) {
-                        oldWs.send(new ArrayBuffer(0)); 
+                        oldWs.send(new ArrayBuffer(0));
                     }
-                    oldWs._isOld = true; 
-                    oldWs.close(1000, 'Session reset');
                 } catch (e) {}
+                setTimeout(() => { try { oldWs.close(1000, 'Session reset'); } catch (e) {} }, OLD_SOCKET_DRAIN_MS);
             }
 
             this.ws = newWs;
@@ -110,11 +123,12 @@ class SonioxClient {
         };
 
         newWs.onmessage = (event) => {
-            if (newWs._isOld) return;
+            if (this._intentionalDisconnect) return;
 
             try {
                 const data = JSON.parse(event.data);
                 if (data.error_code) {
+                    if (newWs._isOld) return;
                     this._handleApiError(data);
                     return;
                 }
@@ -138,13 +152,15 @@ class SonioxClient {
                 this._setStatus('disconnected');
                 return;
             }
+            // The server already reported an API error (bad key, quota...); retrying won't help
+            if (this._fatalError) return;
 
-            if (event.code === 1000) {
-                this._setStatus('disconnected');
-            } else if (event.code === 4001 || event.code === 4003) {
+            if (event.code === 4001 || event.code === 4003) {
                 this._setStatus('error');
                 this.onError?.('Invalid API key.');
             } else {
+                // Includes a normal (1000) close initiated by the server: we still
+                // want to be listening, so reconnect
                 this._tryReconnect(`Connection closed (code: ${event.code})`);
             }
         };
@@ -171,53 +187,92 @@ class SonioxClient {
             this.ws = null;
         }
         this.isConnected = false;
+        this._clearBuffers();
         this._setStatus('disconnected');
     }
 
     _handleResponse(data) {
         if (!data.tokens || data.tokens.length === 0) return;
 
-        let originalText = '';
-        let translationText = '';
         let provisionalText = '';
+        let provisionalSpeaker = null;
         let hasEnd = false;
-        let mainSpeaker = 0;
 
         for (const token of data.tokens) {
-            if (token.speaker !== undefined) {
-                mainSpeaker = token.speaker;
-            }
-
             if (token.text === '<end>') {
                 hasEnd = true;
                 continue;
             }
+            const speaker = this._normalizeSpeaker(token.speaker);
 
-            if (!token.translation_status || token.translation_status === 'original' || token.translation_status === 'none') {
-                if (token.is_final) {
-                    originalText += token.text;
-                } else {
-                    provisionalText += token.text;
-                }
-            } else if (token.translation_status === 'translation') {
-                if (token.is_final) {
-                    translationText += token.text;
-                }
+            if (token.translation_status === 'translation') {
+                if (token.is_final) this._appendFinal('trans', token.text, speaker);
+            } else if (token.is_final) {
+                this._appendFinal('orig', token.text, speaker);
+            } else {
+                provisionalText += token.text;
+                provisionalSpeaker = speaker;
             }
         }
 
-        if (originalText.trim()) {
-            this.onOriginal?.(originalText, mainSpeaker);
+        if (hasEnd) this._flush('orig');
+        this._emitProvisional((this._buffers.orig.text + provisionalText).trim(), provisionalSpeaker ?? this._buffers.orig.speaker);
+    }
+
+    // Soniox numbers speakers from 1 (as strings in recent APIs); the UI uses 0-based indexes
+    _normalizeSpeaker(raw) {
+        if (raw === undefined || raw === null) return this._buffers.orig.speaker;
+        const n = parseInt(raw, 10);
+        return isNaN(n) ? 0 : Math.max(0, n - 1);
+    }
+
+    _appendFinal(kind, text, speaker) {
+        const buf = this._buffers[kind];
+        // A new speaker starts a new utterance
+        if (buf.text.trim() && buf.speaker !== speaker && text.trim()) this._flush(kind);
+        if (!buf.text) buf.speaker = speaker;
+        buf.text += text;
+
+        const trimmed = buf.text.trim();
+        if (trimmed.length >= MAX_BUFFER_CHARS && /[.?!。！？]$/.test(trimmed)) {
+            this._flush(kind);
+            return;
         }
-        if (translationText.trim()) {
-            this.onTranslation?.(translationText, mainSpeaker);
-            this._addToHistory(translationText);
+        clearTimeout(this._flushTimers[kind]);
+        this._flushTimers[kind] = setTimeout(() => {
+            this._flush(kind);
+            if (kind === 'orig') this._emitProvisional('', buf.speaker);
+        }, kind === 'orig' ? ORIGINAL_IDLE_FLUSH_MS : TRANSLATION_IDLE_FLUSH_MS);
+    }
+
+    _flush(kind) {
+        clearTimeout(this._flushTimers[kind]);
+        this._flushTimers[kind] = null;
+        const buf = this._buffers[kind];
+        const text = buf.text.trim();
+        buf.text = '';
+        if (!text) return;
+        if (kind === 'orig') {
+            this.onOriginal?.(text, buf.speaker);
+        } else {
+            this.onTranslation?.(text, buf.speaker);
+            this._addToHistory(text);
         }
-        if (provisionalText.trim()) {
-            this.onProvisional?.(provisionalText, mainSpeaker);
-        } else if (originalText.trim() || translationText.trim() || hasEnd) {
-            this.onProvisional?.('', mainSpeaker);
+    }
+
+    _emitProvisional(text, speaker) {
+        if (text === this._lastProvisional) return;
+        this._lastProvisional = text;
+        this.onProvisional?.(text, speaker);
+    }
+
+    _clearBuffers() {
+        for (const kind of ['orig', 'trans']) {
+            clearTimeout(this._flushTimers[kind]);
+            this._flushTimers[kind] = null;
+            this._buffers[kind].text = '';
         }
+        this._lastProvisional = '';
     }
 
     _startSessionTimer() {
@@ -264,6 +319,7 @@ class SonioxClient {
     }
 
     _handleApiError(data) {
+        this._fatalError = true;
         this._setStatus('error');
         this.onError?.(data.error_message || 'Unknown API error');
     }
